@@ -470,25 +470,55 @@ class SamsungHealthManager(
 
             if (startMs == null || numericValue == null || numericValue == 0.0) return null
 
+            val aggregateDevice = aggregatedDeviceInfo()
             return HealthDataRecord(
                 uid = UUID.randomUUID().toString(),
                 dataType = typeId.uppercase(),
                 startTime = startMs,
                 endTime = endMs ?: startMs,
                 zoneOffset = null,
-                dataSource = RawDataSource(null, null),
-                device = DeviceInfo(
-                    deviceId = null, manufacturer = Build.MANUFACTURER, model = Build.MODEL,
-                    name = Build.DEVICE, brand = Build.BRAND, product = Build.PRODUCT,
-                    osType = "Android", osVersion = Build.VERSION.RELEASE,
-                    sdkVersion = Build.VERSION.SDK_INT, deviceType = "MOBILE", isSourceDevice = false
-                ),
+                dataSource = RawDataSource(SAMSUNG_HEALTH_PACKAGE, aggregateDevice.deviceId),
+                device = aggregateDevice,
                 fields = mapOf(fieldName to numericValue)
             )
         } catch (e: Exception) {
             logger("[$typeId] Failed to parse aggregate item: ${e.javaClass.simpleName}: ${e.message}")
             return null
         }
+    }
+
+    // AggregateRequest loses per-record device info; mirror the CSV importer's
+    // watch-aggregator tagging so backends rank these alongside watch data.
+    private fun aggregatedDeviceInfo(): DeviceInfo {
+        val watch = deviceCache.values.firstOrNull { getDeviceGroup(it) == "WATCH" }
+        if (watch != null) {
+            return DeviceInfo(
+                deviceId = watch.id,
+                manufacturer = watch.manufacturer ?: "Samsung",
+                model = watch.model ?: "Galaxy Watch",
+                name = watch.name ?: watch.model ?: "Galaxy Watch",
+                brand = watch.manufacturer ?: "Samsung",
+                product = watch.model ?: "Galaxy Watch",
+                osType = "Android",
+                osVersion = "",
+                sdkVersion = 0,
+                deviceType = "WATCH",
+                isSourceDevice = false
+            )
+        }
+        return DeviceInfo(
+            deviceId = null,
+            manufacturer = "Samsung",
+            model = "Galaxy Watch",
+            name = "Galaxy Watch",
+            brand = "Samsung",
+            product = "Galaxy Watch",
+            osType = "Android",
+            osVersion = "",
+            sdkVersion = 0,
+            deviceType = "WATCH",
+            isSourceDevice = false
+        )
     }
 
     // -----------------------------------------------------------------------
