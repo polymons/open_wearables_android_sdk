@@ -471,12 +471,18 @@ class SamsungHealthManager(
             if (startMs == null || numericValue == null || numericValue == 0.0) return null
 
             val aggregateDevice = aggregatedDeviceInfo()
+            // AggregateRequest items don't carry per-record zone info; resolve the
+            // device's local offset at startMs so downstream day-bucketing groups
+            // these into the correct local day instead of UTC.
+            val zoneOffset = ZoneId.systemDefault().rules
+                .getOffset(Instant.ofEpochMilli(startMs))
+                .toString()
             return HealthDataRecord(
                 uid = UUID.randomUUID().toString(),
                 dataType = typeId.uppercase(),
                 startTime = startMs,
                 endTime = endMs ?: startMs,
-                zoneOffset = null,
+                zoneOffset = zoneOffset,
                 dataSource = RawDataSource(SAMSUNG_HEALTH_PACKAGE, aggregateDevice.deviceId),
                 device = aggregateDevice,
                 fields = mapOf(fieldName to numericValue)
