@@ -996,12 +996,19 @@ class SamsungHealthManager(
         return try {
             val uid = dataPoint.uid ?: UUID.randomUUID().toString()
             val source = dataPoint.dataSource
+            val startMs = dataPoint.startTime.toEpochMilli()
+            // Samsung Health sometimes omits zoneOffset on individual records (notably for
+            // STEPS rows synthesized from minute buckets); fall back to the device's local
+            // offset at startTime so downstream day-bucketing groups them into the correct
+            // local day instead of UTC.
+            val resolvedZoneOffset = dataPoint.zoneOffset?.toString()
+                ?: ZoneId.systemDefault().rules.getOffset(Instant.ofEpochMilli(startMs)).toString()
             HealthDataRecord(
                 uid = uid,
                 dataType = getDataTypeName(typeId),
-                startTime = dataPoint.startTime.toEpochMilli(),
+                startTime = startMs,
                 endTime = dataPoint.endTime?.toEpochMilli(),
-                zoneOffset = dataPoint.zoneOffset?.toString(),
+                zoneOffset = resolvedZoneOffset,
                 dataSource = RawDataSource(source?.appId, source?.deviceId),
                 device = getDeviceInfo(source),
                 fields = extractFieldsForType(typeId, dataPoint)

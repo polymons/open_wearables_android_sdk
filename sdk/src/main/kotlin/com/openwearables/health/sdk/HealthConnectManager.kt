@@ -15,6 +15,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.*
 import kotlin.reflect.KClass
@@ -325,6 +326,15 @@ class HealthConnectManager(
 
     private fun zoneStr(offset: ZoneOffset?): String? = offset?.toString()
 
+    /**
+     * Resolve the local zone offset for [instant], falling back to the device's current
+     * local offset when the writer omitted it (which Health Connect allows). Without
+     * this, NULL offsets force downstream day-bucketing to treat the timestamp as UTC,
+     * and rows recorded near local midnight land on the wrong day.
+     */
+    private fun zoneStrOrLocal(offset: ZoneOffset?, instant: Instant): String =
+        offset?.toString() ?: ZoneId.systemDefault().rules.getOffset(instant).toString()
+
     private fun instantToIso(instant: Instant): String = UnifiedTimestamp.fromEpochMs(instant.toEpochMilli())
 
     private fun convertSteps(records: List<StepsRecord>): ProviderReadResult {
@@ -332,7 +342,7 @@ class HealthConnectManager(
         val unified = records.map { r ->
             val end = r.endTime.toEpochMilli(); if (maxTs == null || end > maxTs!!) maxTs = end
             UnifiedRecord(r.metadata.id, "STEP_COUNT", instantToIso(r.startTime), instantToIso(r.endTime),
-                zoneStr(r.startZoneOffset), buildSource(r.metadata), r.count.toDouble(), "count", null, null)
+                zoneStrOrLocal(r.startZoneOffset, r.startTime), buildSource(r.metadata), r.count.toDouble(), "count", null, null)
         }
         return ProviderReadResult(UnifiedHealthData(records = unified), maxTs)
     }
