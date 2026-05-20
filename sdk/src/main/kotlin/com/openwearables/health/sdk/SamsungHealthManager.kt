@@ -16,6 +16,8 @@ import com.samsung.android.sdk.health.data.permission.Permission
 import com.samsung.android.sdk.health.data.request.DataType
 import com.samsung.android.sdk.health.data.request.DataTypes
 import com.samsung.android.sdk.health.data.request.LocalTimeFilter
+import com.samsung.android.sdk.health.data.request.LocalTimeGroup
+import com.samsung.android.sdk.health.data.request.LocalTimeGroupUnit
 import com.samsung.android.sdk.health.data.request.Ordering
 import com.samsung.android.sdk.health.data.request.AggregateRequest
 import com.samsung.android.sdk.health.data.request.ReadDataRequest
@@ -45,6 +47,12 @@ class SamsungHealthManager(
     companion object {
         private const val SAMSUNG_HEALTH_PACKAGE = "com.sec.android.app.shealth"
         private const val MIN_SAMSUNG_HEALTH_VERSION = 6030002
+
+        // Stable identity for cross-device aggregate rows (steps, activeEnergy).
+        // Must never vary between syncs — see aggregatedDeviceInfo(). Switch the
+        // grouping unit to MINUTELY below if minute-level resolution is needed.
+        private const val AGGREGATE_DEVICE_MODEL = "Galaxy Watch"
+        private const val AGGREGATE_DEVICE_NAME = "Galaxy Watch"
     }
 
     // -----------------------------------------------------------------------
@@ -307,19 +315,22 @@ class SamsungHealthManager(
             val endTime = LocalDateTime.now()
             val timeFilter = LocalTimeFilter.of(startTime, endTime)
 
+            // Bucket the aggregate into 1-hour groups. STEPS.TOTAL (and
+            // ACTIVITY_SUMMARY.TOTAL_CALORIES) without a time group returns a
+            // SINGLE sum spanning the whole filter window — i.e. one row holding
+            // days or weeks of steps — which makes any per-interval charting
+            // impossible. `LocalTimeGroup.of` is a typed, compile-checked call
+            // against data-1.0.0.aar; only the builder (whose concrete type is
+            // resolved reflectively above) still needs reflection here.
             var hasGrouping = false
             try {
-                val groupClass = Class.forName("com.samsung.android.sdk.health.data.request.LocalTimeGroup")
-                val groupUnitClass = Class.forName("com.samsung.android.sdk.health.data.request.LocalTimeGroupUnit")
-                val hourlyUnit = groupUnitClass.enumConstants?.find { (it as Enum<*>).name == "HOURLY" }
-                if (hourlyUnit != null) {
-                    val groupOfMethod = groupClass.getMethod("of", groupUnitClass, Int::class.java)
-                    val timeGroup = groupOfMethod.invoke(null, hourlyUnit, 1)
-                    builderClass.getMethod("setLocalTimeFilterWithGroup", LocalTimeFilter::class.java, groupClass)
-                        .invoke(builder, timeFilter, timeGroup)
-                    hasGrouping = true
-                }
-            } catch (_: Exception) {}
+                val timeGroup = LocalTimeGroup.of(LocalTimeGroupUnit.HOURLY, 1)
+                builderClass.getMethod("setLocalTimeFilterWithGroup", LocalTimeFilter::class.java, LocalTimeGroup::class.java)
+                    .invoke(builder, timeFilter, timeGroup)
+                hasGrouping = true
+            } catch (e: Exception) {
+                logger("[$typeId] Hourly grouping could not be applied (${e.javaClass.simpleName}: ${e.message}) — falling back to ungrouped read")
+            }
 
             if (!hasGrouping) {
                 try {
@@ -374,19 +385,22 @@ class SamsungHealthManager(
             val startTime = LocalDateTime.now().minusDays(30)
             val timeFilter = LocalTimeFilter.of(startTime, endTime)
 
+            // Bucket the aggregate into 1-hour groups. STEPS.TOTAL (and
+            // ACTIVITY_SUMMARY.TOTAL_CALORIES) without a time group returns a
+            // SINGLE sum spanning the whole filter window — i.e. one row holding
+            // days or weeks of steps — which makes any per-interval charting
+            // impossible. `LocalTimeGroup.of` is a typed, compile-checked call
+            // against data-1.0.0.aar; only the builder (whose concrete type is
+            // resolved reflectively above) still needs reflection here.
             var hasGrouping = false
             try {
-                val groupClass = Class.forName("com.samsung.android.sdk.health.data.request.LocalTimeGroup")
-                val groupUnitClass = Class.forName("com.samsung.android.sdk.health.data.request.LocalTimeGroupUnit")
-                val hourlyUnit = groupUnitClass.enumConstants?.find { (it as Enum<*>).name == "HOURLY" }
-                if (hourlyUnit != null) {
-                    val groupOfMethod = groupClass.getMethod("of", groupUnitClass, Int::class.java)
-                    val timeGroup = groupOfMethod.invoke(null, hourlyUnit, 1)
-                    builderClass.getMethod("setLocalTimeFilterWithGroup", LocalTimeFilter::class.java, groupClass)
-                        .invoke(builder, timeFilter, timeGroup)
-                    hasGrouping = true
-                }
-            } catch (_: Exception) {}
+                val timeGroup = LocalTimeGroup.of(LocalTimeGroupUnit.HOURLY, 1)
+                builderClass.getMethod("setLocalTimeFilterWithGroup", LocalTimeFilter::class.java, LocalTimeGroup::class.java)
+                    .invoke(builder, timeFilter, timeGroup)
+                hasGrouping = true
+            } catch (e: Exception) {
+                logger("[$typeId] Hourly grouping could not be applied (${e.javaClass.simpleName}: ${e.message}) — falling back to ungrouped read")
+            }
 
             if (!hasGrouping) {
                 try {
@@ -493,39 +507,31 @@ class SamsungHealthManager(
         }
     }
 
-    // AggregateRequest loses per-record device info; mirror the CSV importer's
-    // watch-aggregator tagging so backends rank these alongside watch data.
-    private fun aggregatedDeviceInfo(): DeviceInfo {
-        val watch = deviceCache.values.firstOrNull { getDeviceGroup(it) == "WATCH" }
-        if (watch != null) {
-            return DeviceInfo(
-                deviceId = watch.id,
-                manufacturer = watch.manufacturer ?: "Samsung",
-                model = watch.model ?: "Galaxy Watch",
-                name = watch.name ?: watch.model ?: "Galaxy Watch",
-                brand = watch.manufacturer ?: "Samsung",
-                product = watch.model ?: "Galaxy Watch",
-                osType = "Android",
-                osVersion = "",
-                sdkVersion = 0,
-                deviceType = "WATCH",
-                isSourceDevice = false
-            )
-        }
-        return DeviceInfo(
-            deviceId = null,
-            manufacturer = "Samsung",
-            model = "Galaxy Watch",
-            name = "Galaxy Watch",
-            brand = "Samsung",
-            product = "Galaxy Watch",
-            osType = "Android",
-            osVersion = "",
-            sdkVersion = 0,
-            deviceType = "WATCH",
-            isSourceDevice = false
-        )
-    }
+    // AggregateRequest.STEPS.TOTAL already merges every device the user owns
+    // into one cross-device total (the figure Samsung Health's own UI shows),
+    // so these rows must be attributed to ONE stable synthetic device.
+    //
+    // Reading the device out of `deviceCache` made the identity vary between
+    // syncs — whichever watch happened to be cached first ("Galaxy Watch" vs
+    // "Galaxy Watch SDK", or the hard-coded fallback when the cache was empty).
+    // The backend keys a data_source on (user_id, device_model, source); an
+    // unstable identity therefore spawned a fresh data_source on different
+    // syncs, and summing steps across those overlapping sources multi-counted
+    // them. A fixed constant guarantees every aggregate sync for a user lands
+    // in exactly one data_source.
+    private fun aggregatedDeviceInfo(): DeviceInfo = DeviceInfo(
+        deviceId = null,
+        manufacturer = "Samsung",
+        model = AGGREGATE_DEVICE_MODEL,
+        name = AGGREGATE_DEVICE_NAME,
+        brand = "Samsung",
+        product = AGGREGATE_DEVICE_MODEL,
+        osType = "Android",
+        osVersion = "",
+        sdkVersion = 0,
+        deviceType = "WATCH",
+        isSourceDevice = false
+    )
 
     // -----------------------------------------------------------------------
     // Samsung → Unified conversion
